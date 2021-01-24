@@ -67,6 +67,9 @@ pub struct Xmodem {
     /// The checksum mode used by XMODEM. This is determined by the receiver.
     checksum_mode: Checksum,
     errors: u32,
+
+    /// The callback called after every successful packet transfer. Parameter is the transferred packets number
+    packet_callback: Option<fn(u32)>,
 }
 
 impl Xmodem {
@@ -78,6 +81,7 @@ impl Xmodem {
             block_length: BlockLength::Standard,
             checksum_mode: Checksum::Standard,
             errors: 0,
+            packet_callback: None,
         }
     }
 
@@ -132,7 +136,7 @@ impl Xmodem {
         // FIXME: handle written amount
         let _ = dev.write(&[ncg])?;
         debug!("NCG sent. Receiving stream.");
-        let mut packet_num: u8 = 1;
+        let mut packet_num: u32 = 1;
         loop {
             match get_byte_timeout(dev)? {
                 bt @ Some(SOH) | bt @ Some(STX) => {
@@ -182,6 +186,9 @@ impl Xmodem {
                                 let n = dev.write(&[ACK])?;
                                 debug!("ACK sent, {n} bytes");
                                 outstream.write_all(&data[2..data_size + 2])?;
+                                if let Some(callback) = self.packet_callback {
+                                    (callback)(packet_num)
+                                }
                             } else {
                                 info!("Packet failed.");
                                 let n = dev.write(&[NAK])?;
@@ -309,6 +316,9 @@ impl Xmodem {
                     match c {
                         ACK => {
                             debug!("Received ACK for block {block_num}");
+                            if let Some(callback) = self.packet_callback {
+                                (callback)(block_num);
+                            }
                             continue;
                         }
                         NAK => {
