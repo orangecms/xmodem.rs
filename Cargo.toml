@@ -8,7 +8,7 @@ license = "MIT"
 description = "An implementation of the XMODEM file-transfer protocol."
 
 [dependencies]
-log = "^0.3"
+log = "^0.4.17"
 crc16 = "^0.3"
 
 [dev-dependencies]
