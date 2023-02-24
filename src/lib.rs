@@ -49,30 +49,42 @@ pub enum BlockLength {
     OneK = 1024,
 }
 
+type PacketCallback<'a> = &'a dyn Fn(u32);
+
 /// Configuration for the XMODEM transfer.
-#[derive(Copy, Clone, Debug)]
-pub struct Xmodem {
+#[derive(Copy, Clone)]
+pub struct Xmodem<'a> {
     /// The number of errors that can occur before the communication is
     /// considered a failure. Errors include unexpected bytes and timeouts waiting for bytes.
-    pub max_errors: u32,
+    max_errors: u32,
 
     /// The byte used to pad the last block. XMODEM can only send blocks of a certain size,
     /// so if the message is not a multiple of that size the last block needs to be padded.
-    pub pad_byte: u8,
+    pad_byte: u8,
 
     /// The length of each block. There are only two options: 128-byte blocks (standard
     ///  XMODEM) or 1024-byte blocks (XMODEM-1k).
-    pub block_length: BlockLength,
+    block_length: BlockLength,
 
     /// The checksum mode used by XMODEM. This is determined by the receiver.
     checksum_mode: Checksum,
+    /// Error count, used internally for checking against max_errors.
     errors: u32,
 
-    /// The callback called after every successful packet transfer. Parameter is the transferred packets number
-    packet_callback: Option<fn(u32)>,
+    /// The callback called after every successful packet transfer.
+    /// Parameter is the transferred packets number.
+    // packet_callback: Option<Fn(u32)>,
+    // packet_callback: Option<Box<PacketCallback>>,
+    packet_callback: Option<PacketCallback<'a>>,
 }
 
-impl Xmodem {
+impl<'a> Default for Xmodem<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> Xmodem<'a> {
     /// Creates the XMODEM config with default parameters.
     pub fn new() -> Self {
         Xmodem {
@@ -82,6 +94,25 @@ impl Xmodem {
             checksum_mode: Checksum::Standard,
             errors: 0,
             packet_callback: None,
+        }
+    }
+
+    /// Builder for setting custom parameters.
+    ///
+    /// Example:
+    /// ```rs
+    /// fn progress(p: u32) {
+    ///    println!("Packet {p}...");
+    /// }
+    ///
+    /// /* ... */
+    ///     let x = Xmodem::builder().packet_callback(progress).build();
+    ///     x.send(&mut port, &mut file).unwrap();
+    /// /* ... */
+    /// ```
+    pub fn builder() -> XmodemBuilder<'a> {
+        XmodemBuilder {
+            xmodem: Xmodem::new(),
         }
     }
 
@@ -136,6 +167,7 @@ impl Xmodem {
         // FIXME: handle written amount
         let _ = dev.write(&[ncg])?;
         debug!("NCG sent. Receiving stream.");
+        // FIXME: u32 vs u8 is confusing here in various places!
         let mut packet_num: u32 = 1;
         loop {
             match get_byte_timeout(dev)? {
@@ -159,7 +191,7 @@ impl Xmodem {
                             // Check packet number
                             let pnum = data[0];
                             let pnum_1c = data[1];
-                            if (packet_num != pnum) || (255 - pnum != pnum_1c) {
+                            if (packet_num != pnum.into()) || (255 - pnum != pnum_1c) {
                                 // We've lost data; cancel this transmission
                                 warn!("Cancelling transmission.");
                                 let n = dev.write(&[CAN])?;
@@ -187,7 +219,7 @@ impl Xmodem {
                                 debug!("ACK sent, {n} bytes");
                                 outstream.write_all(&data[2..data_size + 2])?;
                                 if let Some(callback) = self.packet_callback {
-                                    (callback)(packet_num)
+                                    callback(packet_num)
                                 }
                             } else {
                                 info!("Packet failed.");
@@ -316,12 +348,16 @@ impl Xmodem {
                     match c {
                         ACK => {
                             debug!("Received ACK for block {block_num}");
+                            self.errors = 0;
                             if let Some(callback) = self.packet_callback {
-                                (callback)(block_num);
+                                callback(block_num);
                             }
+                            // tolerance
+                            std::thread::sleep(std::time::Duration::from_millis(10));
                             continue;
                         }
                         NAK => {
+                            // TODO: retry?
                             error!("Received NAK for block {block_num} :(");
                         }
                         CAN => {
@@ -336,15 +372,15 @@ impl Xmodem {
                         }
                     }
                 }
-                None => warn!("Timeout waiting for ACK for block {}", block_num),
+                None => warn!("Timeout waiting for ACK for block {block_num}"),
             }
 
             self.errors += 1;
 
             if self.errors >= self.max_errors {
                 error!(
-                    "Exhausted max retries ({}) while sending block {} in XMODEM transfer",
-                    self.max_errors, block_num
+                    "Exhausted max retries ({}) while sending block {block_num} in XMODEM transfer",
+                    self.max_errors
                 );
                 return Err(Error::ExhaustedRetries);
             }
@@ -381,6 +417,36 @@ impl Xmodem {
                 return Err(Error::ExhaustedRetries);
             }
         }
+    }
+}
+
+pub struct XmodemBuilder<'a> {
+    xmodem: Xmodem<'a>,
+}
+
+impl<'a> XmodemBuilder<'a> {
+    pub fn max_errors(&mut self, val: u32) -> &Self {
+        self.xmodem.max_errors = val;
+        self
+    }
+
+    pub fn pad_byte(&mut self, val: u8) -> &Self {
+        self.xmodem.pad_byte = val;
+        self
+    }
+
+    pub fn block_length(&mut self, val: BlockLength) -> &Self {
+        self.xmodem.block_length = val;
+        self
+    }
+
+    pub fn packet_callback(&mut self, callback: PacketCallback<'a>) -> &Self {
+        self.xmodem.packet_callback = Some(callback);
+        self
+    }
+
+    pub fn build(&self) -> Xmodem {
+        self.xmodem
     }
 }
 
