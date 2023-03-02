@@ -49,6 +49,9 @@ pub enum BlockLength {
     OneK = 1024,
 }
 
+// NOTE: This is a `dyn Fn` so that a closure may be passed. That allows
+// for the xmodem library consumer to inherit its wider scope, e.g., to
+// read a file size first and print the progress in percentage to it.
 type PacketCallback<'a> = &'a dyn Fn(u32);
 
 /// Configuration for the XMODEM transfer.
