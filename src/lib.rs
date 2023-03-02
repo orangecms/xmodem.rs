@@ -3,7 +3,7 @@ extern crate log;
 extern crate crc16;
 
 use std::convert::From;
-use std::io::{self, Read, Write};
+use std::io::{self, stdout, Read, Write};
 
 // TODO: Send CAN byte after too many errors
 // TODO: Handle CAN bytes while sending
@@ -53,67 +53,54 @@ type PacketCallback<'a> = &'a dyn Fn(u32);
 
 /// Configuration for the XMODEM transfer.
 #[derive(Copy, Clone)]
-pub struct Xmodem<'a> {
+pub struct XmodemCfg<'a> {
     /// The number of errors that can occur before the communication is
     /// considered a failure. Errors include unexpected bytes and timeouts waiting for bytes.
-    max_errors: u32,
+    pub max_errors: u32,
 
     /// The byte used to pad the last block. XMODEM can only send blocks of a certain size,
     /// so if the message is not a multiple of that size the last block needs to be padded.
-    pad_byte: u8,
+    pub pad_byte: u8,
 
     /// The length of each block. There are only two options: 128-byte blocks (standard
     ///  XMODEM) or 1024-byte blocks (XMODEM-1k).
-    block_length: BlockLength,
+    pub block_length: BlockLength,
 
     /// The checksum mode used by XMODEM. This is determined by the receiver.
-    checksum_mode: Checksum,
-    /// Error count, used internally for checking against max_errors.
-    errors: u32,
+    pub checksum_mode: Checksum,
 
     /// The callback called after every successful packet transfer.
     /// Parameter is the transferred packets number.
-    // packet_callback: Option<Fn(u32)>,
-    // packet_callback: Option<Box<PacketCallback>>,
-    packet_callback: Option<PacketCallback<'a>>,
+    pub packet_callback: Option<PacketCallback<'a>>,
+}
+
+/// Configuration for the XMODEM transfer.
+#[derive(Copy, Clone)]
+pub struct Xmodem<'a> {
+    /// Error count, used internally for checking against max_errors.
+    errors: u32,
+    config: XmodemCfg<'a>,
 }
 
 impl<'a> Default for Xmodem<'a> {
     fn default() -> Self {
-        Self::new()
+        Xmodem {
+            errors: 0,
+            config: XmodemCfg {
+                max_errors: 16,
+                pad_byte: 0x1a,
+                block_length: BlockLength::Standard,
+                checksum_mode: Checksum::Standard,
+                packet_callback: None,
+            },
+        }
     }
 }
 
 impl<'a> Xmodem<'a> {
     /// Creates the XMODEM config with default parameters.
-    pub fn new() -> Self {
-        Xmodem {
-            max_errors: 16,
-            pad_byte: 0x1a,
-            block_length: BlockLength::Standard,
-            checksum_mode: Checksum::Standard,
-            errors: 0,
-            packet_callback: None,
-        }
-    }
-
-    /// Builder for setting custom parameters.
-    ///
-    /// Example:
-    /// ```rs
-    /// fn progress(p: u32) {
-    ///    println!("Packet {p}...");
-    /// }
-    ///
-    /// /* ... */
-    ///     let x = Xmodem::builder().packet_callback(progress).build();
-    ///     x.send(&mut port, &mut file).unwrap();
-    /// /* ... */
-    /// ```
-    pub fn builder() -> XmodemBuilder<'a> {
-        XmodemBuilder {
-            xmodem: Xmodem::new(),
-        }
+    pub fn new(config: XmodemCfg<'a>) -> Self {
+        Xmodem { errors: 0, config }
     }
 
     /// Starts the XMODEM transmission.
@@ -158,8 +145,8 @@ impl<'a> Xmodem<'a> {
         checksum: Checksum,
     ) -> Result<()> {
         self.errors = 0;
-        self.checksum_mode = checksum;
-        let ncg = match self.checksum_mode {
+        self.config.checksum_mode = checksum;
+        let ncg = match self.config.checksum_mode {
             Checksum::Standard => NAK,
             Checksum::CRC16 => CRC,
         };
@@ -181,7 +168,7 @@ impl<'a> Xmodem<'a> {
                     let mut data: Vec<u8> = Vec::new();
                     let packet_size = data_size
                         + 2
-                        + match self.checksum_mode {
+                        + match self.config.checksum_mode {
                             Checksum::Standard => 1,
                             Checksum::CRC16 => 2,
                         };
@@ -201,7 +188,7 @@ impl<'a> Xmodem<'a> {
                                 return Err(Error::Canceled);
                             }
                             // Check checksum
-                            let check_ok = match self.checksum_mode {
+                            let check_ok = match self.config.checksum_mode {
                                 Checksum::Standard => {
                                     let recv_checksum = data[packet_size - 1];
                                     calc_checksum(&data[2..packet_size - 1]) == recv_checksum
@@ -218,7 +205,7 @@ impl<'a> Xmodem<'a> {
                                 let n = dev.write(&[ACK])?;
                                 debug!("ACK sent, {n} bytes");
                                 outstream.write_all(&data[2..data_size + 2])?;
-                                if let Some(callback) = self.packet_callback {
+                                if let Some(callback) = self.config.packet_callback {
                                     callback(packet_num)
                                 }
                             } else {
@@ -251,10 +238,10 @@ impl<'a> Xmodem<'a> {
                     let _ = dev.write(&[NAK])?;
                 }
             }
-            if self.errors >= self.max_errors {
+            if self.errors >= self.config.max_errors {
                 error!(
                     "Exhausted max retries ({}) while waiting for ACK for EOT",
-                    self.max_errors
+                    self.config.max_errors
                 );
                 return Err(Error::ExhaustedRetries);
             }
@@ -270,12 +257,12 @@ impl<'a> Xmodem<'a> {
                 Some(c) => match c {
                     NAK => {
                         debug!("Standard checksum requested");
-                        self.checksum_mode = Checksum::Standard;
+                        self.config.checksum_mode = Checksum::Standard;
                         return Ok(());
                     }
                     CRC => {
                         debug!("16-bit CRC requested");
-                        self.checksum_mode = Checksum::CRC16;
+                        self.config.checksum_mode = Checksum::CRC16;
                         return Ok(());
                     }
                     CAN => {
@@ -297,10 +284,10 @@ impl<'a> Xmodem<'a> {
                 return Err(Error::Canceled);
             }
 
-            if self.errors >= self.max_errors {
+            if self.errors >= self.config.max_errors {
                 error!(
                     "Exhausted max retries ({}) at start of XMODEM transfer.",
-                    self.max_errors
+                    self.config.max_errors
                 );
                 if let Err(err) = dev.write_all(&[CAN]) {
                     warn!("Error sending CAN byte: {}", err);
@@ -311,24 +298,24 @@ impl<'a> Xmodem<'a> {
     }
 
     fn send_stream<D: Read + Write, R: Read>(&mut self, dev: &mut D, stream: &mut R) -> Result<()> {
-        let mut block_num = 0u32;
+        let mut block_num = 1u32;
+        let retry = false;
         loop {
-            let mut buff = vec![self.pad_byte; self.block_length as usize + 3];
+            let mut buff = vec![self.config.pad_byte; self.config.block_length as usize + 3];
             let n = stream.read(&mut buff[3..])?;
             if n == 0 {
                 debug!("Reached EOF");
                 return Ok(());
             }
 
-            block_num += 1;
-            buff[0] = match self.block_length {
+            buff[0] = match self.config.block_length {
                 BlockLength::Standard => SOH,
                 BlockLength::OneK => STX,
             };
             buff[1] = (block_num & 0xFF) as u8;
             buff[2] = 0xFF - buff[1];
 
-            match self.checksum_mode {
+            match self.config.checksum_mode {
                 Checksum::Standard => {
                     let checksum = calc_checksum(&buff[3..]);
                     buff.push(checksum);
@@ -343,22 +330,29 @@ impl<'a> Xmodem<'a> {
             info!("Sending block {block_num}");
             dev.write_all(&buff)?;
 
+            //
+            if !retry {
+                block_num += 1;
+            }
+
             match get_byte_timeout(dev)? {
                 Some(c) => {
                     match c {
                         ACK => {
                             debug!("Received ACK for block {block_num}");
                             self.errors = 0;
-                            if let Some(callback) = self.packet_callback {
+                            if let Some(callback) = self.config.packet_callback {
                                 callback(block_num);
                             }
-                            // tolerance
-                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            if retry {
+                                block_num += 1;
+                            }
                             continue;
                         }
                         NAK => {
                             // TODO: retry?
                             error!("Received NAK for block {block_num} :(");
+                            stdout().flush().ok();
                         }
                         CAN => {
                             // TODO handle CAN bytes
@@ -377,10 +371,10 @@ impl<'a> Xmodem<'a> {
 
             self.errors += 1;
 
-            if self.errors >= self.max_errors {
+            if self.errors >= self.config.max_errors {
                 error!(
                     "Exhausted max retries ({}) while sending block {block_num} in XMODEM transfer",
-                    self.max_errors
+                    self.config.max_errors
                 );
                 return Err(Error::ExhaustedRetries);
             }
@@ -409,44 +403,14 @@ impl<'a> Xmodem<'a> {
 
             self.errors += 1;
 
-            if self.errors >= self.max_errors {
+            if self.errors >= self.config.max_errors {
                 error!(
                     "Exhausted max retries ({}) while waiting for ACK for EOT",
-                    self.max_errors
+                    self.config.max_errors
                 );
                 return Err(Error::ExhaustedRetries);
             }
         }
-    }
-}
-
-pub struct XmodemBuilder<'a> {
-    xmodem: Xmodem<'a>,
-}
-
-impl<'a> XmodemBuilder<'a> {
-    pub fn max_errors(&mut self, val: u32) -> &Self {
-        self.xmodem.max_errors = val;
-        self
-    }
-
-    pub fn pad_byte(&mut self, val: u8) -> &Self {
-        self.xmodem.pad_byte = val;
-        self
-    }
-
-    pub fn block_length(&mut self, val: BlockLength) -> &Self {
-        self.xmodem.block_length = val;
-        self
-    }
-
-    pub fn packet_callback(&mut self, callback: PacketCallback<'a>) -> &Self {
-        self.xmodem.packet_callback = Some(callback);
-        self
-    }
-
-    pub fn build(&self) -> Xmodem {
-        self.xmodem
     }
 }
 
