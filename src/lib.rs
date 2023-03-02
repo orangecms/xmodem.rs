@@ -302,7 +302,8 @@ impl<'a> Xmodem<'a> {
 
     fn send_stream<D: Read + Write, R: Read>(&mut self, dev: &mut D, stream: &mut R) -> Result<()> {
         let mut block_num = 1u32;
-        let retry = false;
+        // TODO: Make this an option
+        let retry = true;
         loop {
             let mut buff = vec![self.config.pad_byte; self.config.block_length as usize + 3];
             let n = stream.read(&mut buff[3..])?;
@@ -333,7 +334,8 @@ impl<'a> Xmodem<'a> {
             info!("Sending block {block_num}");
             dev.write_all(&buff)?;
 
-            //
+            // NOTE: If retry is not set, continue with the next block
+            // regardless of error.
             if !retry {
                 block_num += 1;
             }
@@ -353,7 +355,6 @@ impl<'a> Xmodem<'a> {
                             continue;
                         }
                         NAK => {
-                            // TODO: retry?
                             error!("Received NAK for block {block_num} :(");
                             stdout().flush().ok();
                         }
